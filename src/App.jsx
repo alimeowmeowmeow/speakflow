@@ -476,6 +476,7 @@ function SpeakingSession({ weakSpots, nextFocusHint, onEnd, onExit }) {
   const [aiThinking, setAiThinking] = useState(true); // true while waiting on the API
   const [aiSpeakingVisual, setAiSpeakingVisual] = useState(false); // cosmetic only, from TTS
   const [lastLine, setLastLine] = useState({ who: null, text: "" });
+  const [ttsDebug, setTtsDebug] = useState(""); // TEMP DIAGNOSTIC — remove once TTS silence bug is found
 
   // voice input state
   const [useVoice, setUseVoice] = useState(true);
@@ -564,6 +565,7 @@ Rules you always follow:
       audioRef.current = null;
     }
     setAiSpeakingVisual(true);
+    setTtsDebug(""); // TEMP DIAGNOSTIC
     // safety net — in case the audio never loads or onended never fires
     setTimeout(() => setAiSpeakingVisual(false), Math.min(16000, 1200 + text.length * 70));
     try {
@@ -572,7 +574,10 @@ Rules you always follow:
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok) throw new Error("tts request failed");
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        throw new Error(`fetch ${res.status}: ${errBody}`.slice(0, 200));
+      }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
@@ -586,8 +591,10 @@ Rules you always follow:
         URL.revokeObjectURL(url);
       };
       await audio.play();
-    } catch {
+    } catch (err) {
       setAiSpeakingVisual(false);
+      // TEMP DIAGNOSTIC — remove this line once the silent-TTS cause is found
+      setTtsDebug(`TTS failed: ${(err && err.name) || "Error"} — ${(err && err.message) || String(err)}`);
     }
   }
 
@@ -804,6 +811,26 @@ Rules you always follow:
             }}
           >
             {micError}
+          </div>
+        )}
+
+        {ttsDebug && (
+          // TEMP DIAGNOSTIC — remove this whole block once the silent-TTS cause is found
+          <div
+            style={{
+              width: "100%",
+              background: "#2A2610",
+              border: "1px solid #4A3E2E",
+              color: "#E3C068",
+              fontSize: 11.5,
+              fontFamily: "'IBM Plex Mono', monospace",
+              borderRadius: 10,
+              padding: "10px 12px",
+              textAlign: "center",
+              wordBreak: "break-word",
+            }}
+          >
+            {ttsDebug}
           </div>
         )}
 
