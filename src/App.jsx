@@ -706,7 +706,6 @@ Rules you always follow:
   /* ---- recording controls ---- */
   async function startRecording() {
     if (recordingState !== "idle" || aiThinking) return; // already active / not ready
-    unlockAudio(); // real tap right now — keeps TTS playable for the reply a few seconds from now
     setMicError("");
     finalTranscriptRef.current = "";
     setLiveText("");
@@ -739,7 +738,6 @@ Rules you always follow:
   }
   function stopRecording() {
     if (recordingState !== "recording" || !recognitionRef.current) return;
-    unlockAudio(); // real tap right now — the AI's reply is about to be spoken a moment later
     try {
       recognitionRef.current.stop(); // submission happens in onend once the engine flushes final results
     } catch {
