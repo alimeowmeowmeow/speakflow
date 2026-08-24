@@ -721,7 +721,16 @@ Rules you always follow:
       return;
     }
     recognitionRef.current = makeRecognition(SR); // fresh instance per attempt — see makeRecognition for why
-    sharedAudio && sharedAudio.pause(); // release the playback audio session before claiming the mic — iOS won't run both at once
+    // Fully release the playback audio session (not just pause it) and give
+    // iOS a beat to actually hand the audio channel over before claiming the
+    // mic — a bare .pause() wasn't enough, iOS was still tearing down
+    // playback when getUserMedia/recognition.start() fired right after it.
+    if (sharedAudio) {
+      sharedAudio.pause();
+      sharedAudio.removeAttribute("src");
+      sharedAudio.load();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
     setRecordingState("requesting");
     try {
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
