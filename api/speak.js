@@ -1,9 +1,9 @@
 // Vercel serverless function (Node runtime).
 // The browser calls POST /api/speak with { text }.
-// This function attaches the real ElevenLabs API key (from an environment
+// This function attaches the real OpenAI API key (from an environment
 // variable, never sent to the client) and returns synthesized speech audio.
 
-const VOICE_ID = "rCuVrCHOUMY3OwyJBJym"; // ElevenLabs "Mia" — clear, smooth American female voice
+const VOICE = "nova"; // OpenAI TTS — warm, natural American female voice
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -11,9 +11,9 @@ export default async function handler(req, res) {
     return;
   }
 
-  const apiKey = process.env.ELEVENLABS_API_KEY;
+  const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    res.status(500).json({ error: "Server is missing ELEVENLABS_API_KEY" });
+    res.status(500).json({ error: "Server is missing OPENAI_API_KEY" });
     return;
   }
 
@@ -24,23 +24,23 @@ export default async function handler(req, res) {
   }
 
   try {
-    const upstream = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`, {
+    const upstream = await fetch("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "xi-api-key": apiKey,
-        Accept: "audio/mpeg",
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        text,
-        model_id: "eleven_flash_v2_5",
-        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+        model: "gpt-4o-mini-tts",
+        voice: VOICE,
+        input: text,
+        response_format: "mp3",
       }),
     });
 
     if (!upstream.ok) {
       const errText = await upstream.text();
-      res.status(upstream.status).json({ error: errText || "ElevenLabs API error" });
+      res.status(upstream.status).json({ error: errText || "OpenAI TTS API error" });
       return;
     }
 
