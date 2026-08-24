@@ -620,57 +620,63 @@ Rules you always follow:
     if (text) submitRef.current(text);
   }
 
+  // Configures a fresh recognition instance — called anew for every
+  // recording attempt (see startRecording) rather than reusing one object
+  // for the whole session, which Safari handles unreliably past the first
+  // start/stop cycle (fails with error "aborted" on the second attempt).
+  function makeRecognition(SR) {
+    const rec = new SR();
+    rec.lang = "en-US";
+    // Stays listening across pauses instead of auto-ending the moment the
+    // user stops talking for a beat — she decides when she's done by
+    // tapping the mic again, not the engine's silence-detection guess.
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.onresult = (e) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) {
+          finalTranscriptRef.current = (finalTranscriptRef.current + " " + e.results[i][0].transcript).trim();
+        } else {
+          interim += e.results[i][0].transcript;
+        }
+      }
+      setLiveText((finalTranscriptRef.current + " " + interim).trim());
+    };
+    rec.onerror = (e) => {
+      setRecordingState("idle");
+      if (finalTranscriptRef.current.trim()) {
+        finishAndMaybeSubmit();
+        return;
+      }
+      setLiveText("");
+      const reason =
+        e.error === "not-allowed" || e.error === "permission-denied"
+          ? "Microphone access was denied. Allow it in your browser settings, or type instead."
+          : e.error === "no-speech"
+          ? "Didn't catch that — try again, or type instead."
+          : e.error === "audio-capture"
+          ? "No microphone found. Try typing instead."
+          : "Recording stopped unexpectedly. Try again, or type instead.";
+      setMicError(reason);
+    };
+    rec.onend = () => {
+      // Fires both on manual stop and if the engine ends on its own
+      // (some browsers/webviews still time out on long silence even in
+      // continuous mode) — either way, send whatever was captured so far
+      // rather than lose it silently.
+      setRecordingState("idle");
+      finishAndMaybeSubmit();
+    };
+    return rec;
+  }
+
   /* ---- speech recognition setup (runs once) ---- */
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
       setVoiceSupported(false);
       setUseVoice(false);
-    } else {
-      const rec = new SR();
-      rec.lang = "en-US";
-      // Stays listening across pauses instead of auto-ending the moment the
-      // user stops talking for a beat — she decides when she's done by
-      // tapping the mic again, not the engine's silence-detection guess.
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.onresult = (e) => {
-        let interim = "";
-        for (let i = e.resultIndex; i < e.results.length; i++) {
-          if (e.results[i].isFinal) {
-            finalTranscriptRef.current = (finalTranscriptRef.current + " " + e.results[i][0].transcript).trim();
-          } else {
-            interim += e.results[i][0].transcript;
-          }
-        }
-        setLiveText((finalTranscriptRef.current + " " + interim).trim());
-      };
-      rec.onerror = (e) => {
-        setRecordingState("idle");
-        if (finalTranscriptRef.current.trim()) {
-          finishAndMaybeSubmit();
-          return;
-        }
-        setLiveText("");
-        const reason =
-          e.error === "not-allowed" || e.error === "permission-denied"
-            ? "Microphone access was denied. Allow it in your browser settings, or type instead."
-            : e.error === "no-speech"
-            ? "Didn't catch that — try again, or type instead."
-            : e.error === "audio-capture"
-            ? "No microphone found. Try typing instead."
-            : "Recording stopped unexpectedly. Try again, or type instead.";
-        setMicError(`${reason} [debug: ${e.error}]`); // TEMP DIAGNOSTIC — remove bracket once mic bug is found
-      };
-      rec.onend = () => {
-        // Fires both on manual stop and if the engine ends on its own
-        // (some browsers/webviews still time out on long silence even in
-        // continuous mode) — either way, send whatever was captured so far
-        // rather than lose it silently.
-        setRecordingState("idle");
-        finishAndMaybeSubmit();
-      };
-      recognitionRef.current = rec;
     }
 
     // kick off the conversation — the AI opens with the first question
@@ -709,10 +715,12 @@ Rules you always follow:
     setMicError("");
     finalTranscriptRef.current = "";
     setLiveText("");
-    if (!recognitionRef.current) {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
       setMicError("Voice input isn't supported in this browser — type instead.");
       return;
     }
+    recognitionRef.current = makeRecognition(SR); // fresh instance per attempt — see makeRecognition for why
     sharedAudio && sharedAudio.pause(); // release the playback audio session before claiming the mic — iOS won't run both at once
     setRecordingState("requesting");
     try {
