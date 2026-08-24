@@ -3,7 +3,7 @@
 // This function attaches the real ElevenLabs API key (from an environment
 // variable, never sent to the client) and returns synthesized speech audio.
 
-const VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; // ElevenLabs "Rachel" — warm American female voice
+const VOICE_ID = "rCuVrCHOUMY3OwyJBJym"; // ElevenLabs "Mia" — clear, smooth American female voice
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
