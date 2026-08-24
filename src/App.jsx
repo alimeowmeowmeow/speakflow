@@ -497,7 +497,7 @@ function SpeakingSession({ weakSpots, nextFocusHint, onEnd, onExit }) {
   // voice input state
   const [useVoice, setUseVoice] = useState(true);
   const [voiceSupported, setVoiceSupported] = useState(true);
-  const [recordingState, setRecordingState] = useState("idle"); // idle | requesting | recording
+  const [recordingState, setRecordingState] = useState("idle"); // idle | requesting | recording | transcribing
   const [liveText, setLiveText] = useState("");
   const [micError, setMicError] = useState("");
 
@@ -505,10 +505,11 @@ function SpeakingSession({ weakSpots, nextFocusHint, onEnd, onExit }) {
   const [typedInput, setTypedInput] = useState("");
 
   const transcriptRef = useRef([]); // {role, content}[] — sent to the API
-  const recognitionRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const micStreamRef = useRef(null);
+  const audioChunksRef = useRef([]);
   const timerRef = useRef(null);
   const submitRef = useRef(() => {}); // always holds the latest submitUserMessage
-  const finalTranscriptRef = useRef(""); // accumulates final chunks across the whole recording, sent only when recording ends
   const audioRef = useRef(null); // currently playing TTS <audio>, if any
 
   const weakSpotList = weakSpots
@@ -610,71 +611,16 @@ Rules you always follow:
     }
   }
 
-  // Submits whatever's been accumulated so far and clears it — called from
-  // onend (manual stop or the engine giving up on its own) and, as a
-  // fallback, from onerror. Idempotent: a second call finds nothing to send.
-  function finishAndMaybeSubmit() {
-    const text = finalTranscriptRef.current.trim();
-    finalTranscriptRef.current = "";
-    setLiveText("");
-    if (text) submitRef.current(text);
-  }
-
-  // Configures a fresh recognition instance — called anew for every
-  // recording attempt (see startRecording) rather than reusing one object
-  // for the whole session, which Safari handles unreliably past the first
-  // start/stop cycle (fails with error "aborted" on the second attempt).
-  function makeRecognition(SR) {
-    const rec = new SR();
-    rec.lang = "en-US";
-    // Stays listening across pauses instead of auto-ending the moment the
-    // user stops talking for a beat — she decides when she's done by
-    // tapping the mic again, not the engine's silence-detection guess.
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.onresult = (e) => {
-      let interim = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) {
-          finalTranscriptRef.current = (finalTranscriptRef.current + " " + e.results[i][0].transcript).trim();
-        } else {
-          interim += e.results[i][0].transcript;
-        }
-      }
-      setLiveText((finalTranscriptRef.current + " " + interim).trim());
-    };
-    rec.onerror = (e) => {
-      setRecordingState("idle");
-      if (finalTranscriptRef.current.trim()) {
-        finishAndMaybeSubmit();
-        return;
-      }
-      setLiveText("");
-      const reason =
-        e.error === "not-allowed" || e.error === "permission-denied"
-          ? "Microphone access was denied. Allow it in your browser settings, or type instead."
-          : e.error === "no-speech"
-          ? "Didn't catch that — try again, or type instead."
-          : e.error === "audio-capture"
-          ? "No microphone found. Try typing instead."
-          : "Recording stopped unexpectedly. Try again, or type instead.";
-      setMicError(`${reason} [debug: ${e.error}]`); // TEMP DIAGNOSTIC — remove bracket once mic bug is found
-    };
-    rec.onend = () => {
-      // Fires both on manual stop and if the engine ends on its own
-      // (some browsers/webviews still time out on long silence even in
-      // continuous mode) — either way, send whatever was captured so far
-      // rather than lose it silently.
-      setRecordingState("idle");
-      finishAndMaybeSubmit();
-    };
-    return rec;
-  }
-
-  /* ---- speech recognition setup (runs once) ---- */
+  /* ---- voice input setup (runs once) ----
+     Records raw audio with MediaRecorder and transcribes it server-side via
+     Whisper (/api/transcribe), instead of the browser's own speech
+     recognition — webkitSpeechRecognition's continuous mode is
+     documented as unreliable on iOS/WebKit (fails with "aborted" on the
+     second start), while MediaRecorder + getUserMedia is well-supported
+     there. The tradeoff: no live captions while speaking, only after you
+     stop and it's been transcribed — see the "You said" preview below. */
   useEffect(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)) {
       setVoiceSupported(false);
       setUseVoice(false);
     }
@@ -702,41 +648,66 @@ Rules you always follow:
 
     return () => {
       try {
-        recognitionRef.current && recognitionRef.current.stop();
+        mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive" && mediaRecorderRef.current.stop();
+      } catch {}
+      try {
+        micStreamRef.current && micStreamRef.current.getTracks().forEach((t) => t.stop());
       } catch {}
       audioRef.current && audioRef.current.pause();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Sends the recorded clip to /api/transcribe, briefly shows what it heard,
+  // then hands the text to the same submitUserMessage pipeline as typing.
+  async function transcribeAndSubmit(blob, mimeType) {
+    setRecordingState("transcribing");
+    try {
+      const audioBase64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      const res = await fetch("/api/transcribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audioBase64, mimeType }),
+      });
+      if (!res.ok) throw new Error("transcription failed");
+      const { text } = await res.json();
+      const clean = (text || "").trim();
+      setRecordingState("idle");
+      if (!clean) return;
+      setLiveText(`You said: "${clean}"`);
+      setTimeout(() => setLiveText(""), 1500);
+      submitRef.current(clean);
+    } catch {
+      setRecordingState("idle");
+      setMicError("Couldn't transcribe that — try again, or type instead.");
+    }
+  }
+
   /* ---- recording controls ---- */
   async function startRecording() {
     if (recordingState !== "idle" || aiThinking) return; // already active / not ready
     setMicError("");
-    finalTranscriptRef.current = "";
     setLiveText("");
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)) {
       setMicError("Voice input isn't supported in this browser — type instead.");
       return;
     }
-    recognitionRef.current = makeRecognition(SR); // fresh instance per attempt — see makeRecognition for why
-    // Fully release the playback audio session (not just pause it) and give
-    // iOS a beat to actually hand the audio channel over before claiming the
-    // mic — a bare .pause() wasn't enough, iOS was still tearing down
-    // playback when getUserMedia/recognition.start() fired right after it.
+    // Release the playback audio session before claiming the mic — cheap
+    // hygiene against iOS play/record channel conflicts, regardless of API.
     if (sharedAudio) {
       sharedAudio.pause();
       sharedAudio.removeAttribute("src");
       sharedAudio.load();
     }
-    await new Promise((resolve) => setTimeout(resolve, 300));
     setRecordingState("requesting");
+    let stream;
     try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach((t) => t.stop());
-      }
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
       setRecordingState("idle");
       setMicError(
@@ -746,21 +717,41 @@ Rules you always follow:
       );
       return;
     }
+    micStreamRef.current = stream;
+    const mimeType = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find(
+      (t) => window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(t)
+    );
     try {
-      recognitionRef.current.start();
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType || mimeType || "audio/webm" });
+        audioChunksRef.current = [];
+        if (blob.size < 1000) {
+          setRecordingState("idle"); // essentially empty — a stray tap, nothing worth transcribing
+          return;
+        }
+        transcribeAndSubmit(blob, blob.type);
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
       setRecordingState("recording");
     } catch {
+      stream.getTracks().forEach((t) => t.stop());
       setRecordingState("idle");
       setMicError("Recording couldn't start — try again in a moment.");
     }
   }
   function stopRecording() {
-    if (recordingState !== "recording" || !recognitionRef.current) return;
+    if (recordingState !== "recording" || !mediaRecorderRef.current) return;
     try {
-      recognitionRef.current.stop(); // submission happens in onend once the engine flushes final results
+      mediaRecorderRef.current.stop(); // onstop picks up from here and sends it for transcription
     } catch {
       setRecordingState("idle");
-      finishAndMaybeSubmit(); // stop() itself threw — onend won't fire, so submit here instead
     }
   }
   function submitTyped() {
@@ -779,6 +770,8 @@ Rules you always follow:
     ? "requesting microphone…"
     : recordingState === "recording"
     ? "listening… tap mic to send"
+    : recordingState === "transcribing"
+    ? "transcribing…"
     : aiSpeakingVisual
     ? "speaking"
     : lastLine.who === "user"
@@ -847,18 +840,18 @@ Rules you always follow:
         {useVoice ? (
           <button
             onClick={recordingState === "recording" ? stopRecording : startRecording}
-            disabled={aiThinking || recordingState === "requesting"}
+            disabled={aiThinking || recordingState === "requesting" || recordingState === "transcribing"}
             style={{
               width: 68,
               height: 68,
               borderRadius: "50%",
               border: "none",
               background: recordingState === "recording" ? "#E3A868" : "#6FB3AA",
-              opacity: aiThinking || recordingState === "requesting" ? 0.4 : 1,
+              opacity: aiThinking || recordingState === "requesting" || recordingState === "transcribing" ? 0.4 : 1,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              cursor: aiThinking || recordingState === "requesting" ? "default" : "pointer",
+              cursor: aiThinking || recordingState === "requesting" || recordingState === "transcribing" ? "default" : "pointer",
             }}
             aria-label={recordingState === "recording" ? "Stop recording" : "Start recording"}
           >
