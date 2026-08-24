@@ -131,8 +131,30 @@ async function callClaude({ system, messages, jsonMode = false }) {
 }
 
 /* ---------- persistence ----------
-   Real localStorage, since this now runs as a normal top-level page
-   (not inside the artifact sandbox) — data stays on this device only. */
+   localStorage is the fast local cache (works offline, instant on load).
+   The sync code links this device to a shared blob in Upstash (via
+   /api/sync), so the same code on another device sees the same sessions.
+   Sessions are merged by id, never blindly overwritten, so a device that
+   was offline never loses data it hasn't synced yet. */
+const SYNC_CODE_KEY = "speakflow-sync-code";
+
+function genSyncCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no ambiguous 0/O/1/I
+  const part = () => Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  return `${part()}-${part()}`;
+}
+
+function mergeSessions(local, remote) {
+  const byId = new Map();
+  [...remote, ...local].forEach((s) => {
+    if (s && s.id) byId.set(s.id, s);
+  });
+  return Array.from(byId.values()).sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+    return a.id < b.id ? -1 : 1;
+  });
+}
+
 function useSpeakFlowData() {
   const [data, setData] = useState(() => {
     try {
@@ -142,21 +164,87 @@ function useSpeakFlowData() {
       return { sessions: [] };
     }
   });
+  const [syncCode, setSyncCode] = useState(() => {
+    try {
+      let code = window.localStorage.getItem(SYNC_CODE_KEY);
+      if (!code) {
+        code = genSyncCode();
+        window.localStorage.setItem(SYNC_CODE_KEY, code);
+      }
+      return code;
+    } catch {
+      return genSyncCode();
+    }
+  });
+  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | error
+
+  const persistLocal = useCallback((next) => {
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch {}
+  }, []);
+
+  const pushRemote = useCallback(async (sessions, code) => {
+    try {
+      await fetch(`/api/sync?code=${encodeURIComponent(code)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessions }),
+      });
+    } catch {}
+  }, []);
+
+  // Pull remote on mount and whenever the sync code changes; merge with
+  // whatever's local so nothing gets lost, then reconcile back.
+  useEffect(() => {
+    let cancelled = false;
+    setSyncStatus("syncing");
+    (async () => {
+      try {
+        const res = await fetch(`/api/sync?code=${encodeURIComponent(syncCode)}`);
+        if (!res.ok) throw new Error("sync fetch failed");
+        const { sessions: remoteSessions } = await res.json();
+        if (cancelled) return;
+        setData((prev) => {
+          const merged = mergeSessions(prev.sessions, remoteSessions || []);
+          const next = { ...prev, sessions: merged };
+          persistLocal(next);
+          pushRemote(merged, syncCode);
+          return next;
+        });
+        setSyncStatus("idle");
+      } catch {
+        if (!cancelled) setSyncStatus("error");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncCode]);
 
   const addSession = useCallback(
     (session) => {
       setData((prev) => {
         const next = { ...prev, sessions: [...prev.sessions, session] };
-        try {
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-        } catch {}
+        persistLocal(next);
+        pushRemote(next.sessions, syncCode);
         return next;
       });
     },
-    []
+    [persistLocal, pushRemote, syncCode]
   );
 
-  return { data, loaded: true, addSession };
+  const linkSyncCode = useCallback((code) => {
+    const clean = (code || "").trim().toUpperCase();
+    if (!clean) return;
+    try {
+      window.localStorage.setItem(SYNC_CODE_KEY, clean);
+    } catch {}
+    setSyncCode(clean);
+  }, []);
+
+  return { data, loaded: true, addSession, syncCode, syncStatus, linkSyncCode };
 }
 
 /* ---------- breath orb (signature element) ---------- */
@@ -273,7 +361,7 @@ const secondaryBtnStyle = {
 /* ============================================================
    HOME
    ============================================================ */
-function Home({ sessions, onStart, onLiveClub, onProgress, onWeakSpots }) {
+function Home({ sessions, onStart, onLiveClub, onProgress, onWeakSpots, onSync }) {
   const week = sessions.filter((s) => isThisWeek(s.date));
   const aiThisWeek = week.filter((s) => s.type === "ai_session").length;
   const clubThisWeek = week.filter((s) => s.type === "live_club").length;
@@ -341,6 +429,9 @@ function Home({ sessions, onStart, onLiveClub, onProgress, onWeakSpots }) {
         </button>
         <button onClick={onWeakSpots} style={linkStyle}>
           Weak spots
+        </button>
+        <button onClick={onSync} style={linkStyle}>
+          Sync
         </button>
       </div>
     </Screen>
@@ -1186,10 +1277,91 @@ function WeakSpots({ sessions, onExit }) {
 }
 
 /* ============================================================
+   SYNC SETTINGS
+   ============================================================ */
+function SyncSettings({ syncCode, syncStatus, onLink, onExit }) {
+  const [input, setInput] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  function copy() {
+    try {
+      navigator.clipboard.writeText(syncCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {}
+  }
+
+  return (
+    <Screen>
+      <TopBar title="Sync" onBack={onExit} />
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 20, justifyContent: "center" }}>
+        <div style={cardStyle}>
+          <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 10 }}>
+            Your sync code — enter it on another device to see the same progress there
+          </div>
+          <div
+            style={{
+              fontFamily: "'IBM Plex Mono', monospace",
+              fontSize: 22,
+              color: "#EDEFF2",
+              letterSpacing: 1,
+              marginBottom: 12,
+            }}
+          >
+            {syncCode}
+          </div>
+          <button style={secondaryBtnStyle} onClick={copy}>
+            {copied ? "Copied" : "Copy code"}
+          </button>
+          {syncStatus === "error" && (
+            <div style={{ fontSize: 12.5, color: "#C97B63", marginTop: 10 }}>
+              Couldn't reach the sync server — your data is still safe on this device.
+            </div>
+          )}
+        </div>
+
+        <div style={cardStyle}>
+          <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 10 }}>
+            Have a code from another device? Enter it to link this device to that progress.
+          </div>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="e.g. AB3D-9K2M"
+            style={{
+              width: "100%",
+              background: "#1D2128",
+              border: "1px solid #262B33",
+              borderRadius: 12,
+              padding: 12,
+              color: "#EDEFF2",
+              fontSize: 15,
+              fontFamily: "'IBM Plex Mono', monospace",
+              marginBottom: 12,
+            }}
+          />
+          <button
+            style={primaryBtnStyle}
+            onClick={() => {
+              if (input.trim()) {
+                onLink(input.trim());
+                setInput("");
+              }
+            }}
+          >
+            Use this code
+          </button>
+        </div>
+      </div>
+    </Screen>
+  );
+}
+
+/* ============================================================
    ROOT APP
    ============================================================ */
 export default function App() {
-  const { data, loaded, addSession } = useSpeakFlowData();
+  const { data, loaded, addSession, syncCode, syncStatus, linkSyncCode } = useSpeakFlowData();
   const [screen, setScreen] = useState("home");
   const [activeSession, setActiveSession] = useState(null);
 
@@ -1225,6 +1397,7 @@ export default function App() {
           onLiveClub={() => setScreen("liveclub")}
           onProgress={() => setScreen("progress")}
           onWeakSpots={() => setScreen("weakspots")}
+          onSync={() => setScreen("sync")}
         />
       )}
 
@@ -1265,6 +1438,14 @@ export default function App() {
 
       {screen === "progress" && <Progress sessions={data.sessions} onExit={() => setScreen("home")} />}
       {screen === "weakspots" && <WeakSpots sessions={data.sessions} onExit={() => setScreen("home")} />}
+      {screen === "sync" && (
+        <SyncSettings
+          syncCode={syncCode}
+          syncStatus={syncStatus}
+          onLink={linkSyncCode}
+          onExit={() => setScreen("home")}
+        />
+      )}
     </>
   );
 }
