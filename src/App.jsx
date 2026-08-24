@@ -1,6 +1,23 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Mic, Square, ChevronLeft, Flame, TrendingUp, Type, Sparkles } from "lucide-react";
 
+/* Safari on iOS only allows audio.play() when it's tied to a real tap. One
+   shared <audio> element, "unlocked" by playing a silent clip synchronously
+   inside real button taps, stays playable for later programmatic TTS calls
+   that happen after an async round-trip — a fresh `new Audio()` each time
+   does not. */
+const SILENT_AUDIO_SRC =
+  "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+const sharedAudio = typeof Audio !== "undefined" ? new Audio() : null;
+function unlockAudio() {
+  if (!sharedAudio) return;
+  try {
+    sharedAudio.src = SILENT_AUDIO_SRC;
+    const p = sharedAudio.play();
+    if (p && p.catch) p.catch(() => {});
+  } catch {}
+}
+
 /* ============================================================
    SpeakFlow — English speaking-fluency companion (MVP)
    Design notes (for future-me / future passes):
@@ -476,7 +493,6 @@ function SpeakingSession({ weakSpots, nextFocusHint, onEnd, onExit }) {
   const [aiThinking, setAiThinking] = useState(true); // true while waiting on the API
   const [aiSpeakingVisual, setAiSpeakingVisual] = useState(false); // cosmetic only, from TTS
   const [lastLine, setLastLine] = useState({ who: null, text: "" });
-  const [ttsDebug, setTtsDebug] = useState(""); // TEMP DIAGNOSTIC — remove once TTS silence bug is found
 
   // voice input state
   const [useVoice, setUseVoice] = useState(true);
@@ -558,14 +574,14 @@ Rules you always follow:
     submitRef.current = submitUserMessage;
   }, [submitUserMessage]);
 
-  /* ---- text-to-speech: cosmetic, non-blocking, never hangs the pipeline ---- */
+  /* ---- text-to-speech: cosmetic, non-blocking, never hangs the pipeline ----
+     Reuses the module-level `sharedAudio` element (unlocked by a real tap in
+     startRecording/stopRecording) instead of `new Audio()` per call — iOS
+     Safari blocks autoplay on a freshly created element once we're a few
+     async steps removed from the gesture that triggered this turn. */
   async function speakAloud(text) {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
-    }
+    audioRef.current = sharedAudio;
     setAiSpeakingVisual(true);
-    setTtsDebug(""); // TEMP DIAGNOSTIC
     // safety net — in case the audio never loads or onended never fires
     setTimeout(() => setAiSpeakingVisual(false), Math.min(16000, 1200 + text.length * 70));
     try {
@@ -574,14 +590,12 @@ Rules you always follow:
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => "");
-        throw new Error(`fetch ${res.status}: ${errBody}`.slice(0, 200));
-      }
+      if (!res.ok) throw new Error("tts request failed");
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      audioRef.current = audio;
+      const audio = sharedAudio;
+      audio.pause();
+      audio.src = url;
       audio.onended = () => {
         setAiSpeakingVisual(false);
         URL.revokeObjectURL(url);
@@ -591,10 +605,8 @@ Rules you always follow:
         URL.revokeObjectURL(url);
       };
       await audio.play();
-    } catch (err) {
+    } catch {
       setAiSpeakingVisual(false);
-      // TEMP DIAGNOSTIC — remove this line once the silent-TTS cause is found
-      setTtsDebug(`TTS failed: ${(err && err.name) || "Error"} — ${(err && err.message) || String(err)}`);
     }
   }
 
@@ -694,6 +706,7 @@ Rules you always follow:
   /* ---- recording controls ---- */
   async function startRecording() {
     if (recordingState !== "idle" || aiThinking) return; // already active / not ready
+    unlockAudio(); // real tap right now — keeps TTS playable for the reply a few seconds from now
     setMicError("");
     finalTranscriptRef.current = "";
     setLiveText("");
@@ -726,6 +739,7 @@ Rules you always follow:
   }
   function stopRecording() {
     if (recordingState !== "recording" || !recognitionRef.current) return;
+    unlockAudio(); // real tap right now — the AI's reply is about to be spoken a moment later
     try {
       recognitionRef.current.stop(); // submission happens in onend once the engine flushes final results
     } catch {
@@ -811,26 +825,6 @@ Rules you always follow:
             }}
           >
             {micError}
-          </div>
-        )}
-
-        {ttsDebug && (
-          // TEMP DIAGNOSTIC — remove this whole block once the silent-TTS cause is found
-          <div
-            style={{
-              width: "100%",
-              background: "#2A2610",
-              border: "1px solid #4A3E2E",
-              color: "#E3C068",
-              fontSize: 11.5,
-              fontFamily: "'IBM Plex Mono', monospace",
-              borderRadius: 10,
-              padding: "10px 12px",
-              textAlign: "center",
-              wordBreak: "break-word",
-            }}
-          >
-            {ttsDebug}
           </div>
         )}
 
@@ -1442,7 +1436,10 @@ export default function App() {
       {screen === "home" && (
         <Home
           sessions={data.sessions}
-          onStart={() => setScreen("session")}
+          onStart={() => {
+            unlockAudio();
+            setScreen("session");
+          }}
           onLiveClub={() => setScreen("liveclub")}
           onProgress={() => setScreen("progress")}
           onWeakSpots={() => setScreen("weakspots")}
