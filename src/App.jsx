@@ -28,6 +28,12 @@ const TOPICS = [
   "how technology has changed your daily life",
   "a person who influenced how you think",
   "something you changed your mind about recently",
+  "strength training — how you train and what you've learned about how women should train",
+  "women's health — hormones, cycles, or anything you've learned about your body",
+  "nutrition — what you've changed about how you eat, sugar, habits that stuck",
+  "psychology or self-development — something you've been working on internally",
+  "a place you've traveled to, or want to",
+  "your work as a Product Manager — a goal, a challenge, something you're figuring out",
 ];
 
 const STORAGE_KEY = "speakflow-data";
@@ -86,6 +92,10 @@ function aggregateWeakSpots(sessions) {
     });
   });
   return Array.from(counts.values()).sort((a, b) => b.count - a.count);
+}
+function lastNextFocus(sessions) {
+  const withFocus = sessions.filter((s) => s.type === "ai_session" && s.nextFocus);
+  return withFocus.length ? withFocus[withFocus.length - 1].nextFocus : "";
 }
 
 // Talks to our own /api/chat serverless function (see /api/chat.js), which
@@ -367,7 +377,7 @@ const linkStyle = {
    is not safe (a slow/failed request or a webview quirk could hang
    the whole conversation waiting for it).
    ============================================================ */
-function SpeakingSession({ weakSpots, onEnd, onExit }) {
+function SpeakingSession({ weakSpots, nextFocusHint, onEnd, onExit }) {
   const [topic] = useState(() => TOPICS[Math.floor(Math.random() * TOPICS.length)]);
   const [seconds, setSeconds] = useState(0);
 
@@ -398,7 +408,12 @@ function SpeakingSession({ weakSpots, onEnd, onExit }) {
     .map((w) => w.category)
     .join(", ");
 
-  const system = `You are a warm, genuinely curious English conversation partner helping a B1-to-B2 learner get comfortable holding a real 30-40 minute conversation with a new person. Rules you always follow:
+  const system = `You are a warm, genuinely curious English conversation partner helping a B1-to-B2 learner get comfortable holding a real 30-40 minute conversation with a new person.
+
+STUDENT: Alina, B1 level, native Russian speaker.
+CURRENT GOAL (through 1 Dec 2026): make live conversation feel normal, not stressful — hold a natural 30-40 min conversation with a new person without switching to Russian, at ease-of-speech 7/10+.
+
+Rules you always follow:
 - Speak only in natural, spoken-style English. No Russian, ever.
 - Priority order: fluency first, confidence second, accuracy last. NEVER correct grammar or pronunciation during the conversation, even if you notice mistakes — just keep the conversation flowing naturally. Corrections happen later, in the debrief, not here.
 - Keep your own turns short and natural, like real speech: 1-3 sentences, then usually one genuine follow-up question.
@@ -407,7 +422,9 @@ function SpeakingSession({ weakSpots, onEnd, onExit }) {
 - Start around B1-B2 difficulty and adapt gradually to how the user is doing.
 - If the user seems to be searching for a word, first encourage them to paraphrase or describe it, and only if they're still stuck, offer one natural expression.
 - Weave in natural opportunities (without announcing it) to use these areas the user has struggled with before, if it fits naturally: ${weakSpotList || "(none yet)"}.
-- Today's topic to explore together: ${topic}. Open with a short, friendly, specific question about it — don't just say "let's talk about X".`;
+- Today's topic to explore together: ${topic}. Open with a short, friendly, specific question about it — don't just say "let's talk about X".${
+    nextFocusHint ? `\n- Last time, the suggested focus for the next session was: "${nextFocusHint}". Keep this in mind if it fits naturally into the conversation — don't force it.` : ""
+  }`;
 
   /* ---- timer ---- */
   useEffect(() => {
@@ -769,7 +786,7 @@ function SpeakingSession({ weakSpots, onEnd, onExit }) {
 /* ============================================================
    SESSION DEBRIEF
    ============================================================ */
-function SessionDebrief({ session, onSave, onExit }) {
+function SessionDebrief({ session, sessions, onSave, onExit }) {
   const [step, setStep] = useState("rate"); // rate | generating | result
   const [ease, setEase] = useState(6);
   const [hardest, setHardest] = useState("");
@@ -780,9 +797,14 @@ function SessionDebrief({ session, onSave, onExit }) {
     const transcriptText = session.transcript
       .map((t) => `${t.role === "assistant" ? "AI" : "User"}: ${t.content}`)
       .join("\n");
+    const knownCategories = aggregateWeakSpots(sessions || []).map((w) => w.category);
     const system = `You analyze an English speaking practice transcript for a B1-to-B2 learner. Be direct and specific, not diplomatic. Return ONLY valid JSON, no prose, no markdown fences, matching exactly this shape:
 {"corrections": [{"issue": "short natural-language description of the mistake, quoting what they said if useful", "category": "2-4 word category label, consistent wording you'd reuse across sessions e.g. 'past tense irregulars', 'articles a/the', 'prepositions of time'"}], "phrases": ["natural phrase or expression they could use next time", "..."], "nextFocus": "one specific, concrete focus for the next session, one sentence"}
-Rules: corrections array has AT MOST 3 items — pick only the most important recurring or fluency-blocking ones, ignore minor one-off slips. phrases array has 3 to 5 natural, spoken-register phrases relevant to what they were actually talking about. Never invent mistakes that aren't in the transcript.`;
+Rules: corrections array has AT MOST 3 items — pick only the most important recurring or fluency-blocking ones, ignore minor one-off slips. phrases array has 3 to 5 natural, spoken-register phrases relevant to what they were actually talking about. Never invent mistakes that aren't in the transcript.${
+      knownCategories.length
+        ? ` Known category labels from past sessions: ${knownCategories.join(", ")}. If a mistake matches one of these, reuse the exact same label — don't invent a slightly different wording for the same kind of mistake. Only use a new label if it's genuinely a different kind of mistake.`
+        : ""
+    }`;
     const userMsg = `Transcript:\n${transcriptText}\n\nThe user said speaking felt this hard today (1-10): ${ease}\nWhat felt hardest, in their words: "${hardest || "(not specified)"}"`;
     const data = await callClaude({ system, messages: [{ role: "user", content: userMsg }], jsonMode: true });
     setResult(
@@ -1182,6 +1204,7 @@ export default function App() {
   }
 
   const weakSpots = aggregateWeakSpots(data.sessions);
+  const nextFocusHint = lastNextFocus(data.sessions);
 
   return (
     <>
@@ -1208,6 +1231,7 @@ export default function App() {
       {screen === "session" && (
         <SpeakingSession
           weakSpots={weakSpots}
+          nextFocusHint={nextFocusHint}
           onExit={() => setScreen("home")}
           onEnd={(s) => {
             setActiveSession(s);
@@ -1219,6 +1243,7 @@ export default function App() {
       {screen === "debrief" && activeSession && (
         <SessionDebrief
           session={activeSession}
+          sessions={data.sessions}
           onExit={() => setScreen("home")}
           onSave={(record) => {
             addSession(record);
