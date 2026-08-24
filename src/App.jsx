@@ -491,6 +491,7 @@ function SpeakingSession({ weakSpots, nextFocusHint, onEnd, onExit }) {
   const recognitionRef = useRef(null);
   const timerRef = useRef(null);
   const submitRef = useRef(() => {}); // always holds the latest submitUserMessage
+  const finalTranscriptRef = useRef(""); // accumulates final chunks across the whole recording, sent only when recording ends
   const audioRef = useRef(null); // currently playing TTS <audio>, if any
 
   const weakSpotList = weakSpots
@@ -590,6 +591,16 @@ Rules you always follow:
     }
   }
 
+  // Submits whatever's been accumulated so far and clears it — called from
+  // onend (manual stop or the engine giving up on its own) and, as a
+  // fallback, from onerror. Idempotent: a second call finds nothing to send.
+  function finishAndMaybeSubmit() {
+    const text = finalTranscriptRef.current.trim();
+    finalTranscriptRef.current = "";
+    setLiveText("");
+    if (text) submitRef.current(text);
+  }
+
   /* ---- speech recognition setup (runs once) ---- */
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -599,23 +610,28 @@ Rules you always follow:
     } else {
       const rec = new SR();
       rec.lang = "en-US";
-      rec.continuous = false;
+      // Stays listening across pauses instead of auto-ending the moment the
+      // user stops talking for a beat — she decides when she's done by
+      // tapping the mic again, not the engine's silence-detection guess.
+      rec.continuous = true;
       rec.interimResults = true;
       rec.onresult = (e) => {
         let interim = "";
-        let final = "";
         for (let i = e.resultIndex; i < e.results.length; i++) {
-          if (e.results[i].isFinal) final += e.results[i][0].transcript;
-          else interim += e.results[i][0].transcript;
+          if (e.results[i].isFinal) {
+            finalTranscriptRef.current = (finalTranscriptRef.current + " " + e.results[i][0].transcript).trim();
+          } else {
+            interim += e.results[i][0].transcript;
+          }
         }
-        setLiveText(interim);
-        if (final.trim()) {
-          setLiveText("");
-          submitRef.current(final.trim());
-        }
+        setLiveText((finalTranscriptRef.current + " " + interim).trim());
       };
       rec.onerror = (e) => {
         setRecordingState("idle");
+        if (finalTranscriptRef.current.trim()) {
+          finishAndMaybeSubmit();
+          return;
+        }
         setLiveText("");
         const reason =
           e.error === "not-allowed" || e.error === "permission-denied"
@@ -628,9 +644,12 @@ Rules you always follow:
         setMicError(reason);
       };
       rec.onend = () => {
-        // always resets, so the user can record again no matter how it ended
+        // Fires both on manual stop and if the engine ends on its own
+        // (some browsers/webviews still time out on long silence even in
+        // continuous mode) — either way, send whatever was captured so far
+        // rather than lose it silently.
         setRecordingState("idle");
-        setLiveText("");
+        finishAndMaybeSubmit();
       };
       recognitionRef.current = rec;
     }
@@ -669,6 +688,8 @@ Rules you always follow:
   async function startRecording() {
     if (recordingState !== "idle" || aiThinking) return; // already active / not ready
     setMicError("");
+    finalTranscriptRef.current = "";
+    setLiveText("");
     if (!recognitionRef.current) {
       setMicError("Voice input isn't supported in this browser — type instead.");
       return;
@@ -699,9 +720,10 @@ Rules you always follow:
   function stopRecording() {
     if (recordingState !== "recording" || !recognitionRef.current) return;
     try {
-      recognitionRef.current.stop();
+      recognitionRef.current.stop(); // submission happens in onend once the engine flushes final results
     } catch {
       setRecordingState("idle");
+      finishAndMaybeSubmit(); // stop() itself threw — onend won't fire, so submit here instead
     }
   }
   function submitTyped() {
@@ -719,7 +741,7 @@ Rules you always follow:
     : recordingState === "requesting"
     ? "requesting microphone…"
     : recordingState === "recording"
-    ? "listening…"
+    ? "listening… tap mic to send"
     : aiSpeakingVisual
     ? "speaking"
     : lastLine.who === "user"
