@@ -660,7 +660,7 @@ Rules you always follow:
             : e.error === "audio-capture"
             ? "No microphone found. Try typing instead."
             : "Recording stopped unexpectedly. Try again, or type instead.";
-        setMicError(reason);
+        setMicError(`${reason} [debug: ${e.error}]`); // TEMP DIAGNOSTIC — remove bracket once mic bug is found
       };
       rec.onend = () => {
         // Fires both on manual stop and if the engine ends on its own
