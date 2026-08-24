@@ -713,6 +713,7 @@ Rules you always follow:
       setMicError("Voice input isn't supported in this browser — type instead.");
       return;
     }
+    sharedAudio && sharedAudio.pause(); // release the playback audio session before claiming the mic — iOS won't run both at once
     setRecordingState("requesting");
     try {
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
