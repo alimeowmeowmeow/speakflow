@@ -363,9 +363,9 @@ const linkStyle = {
    the voice recognition's final-result callback call it — there
    is no separate "voice conversation logic". Text-to-speech is
    fire-and-forget: it never blocks the pipeline, because relying
-   on the browser's speechSynthesis "onend" event to always fire
-   is not safe (some browsers/webviews never fire it, which used
-   to hang the whole conversation waiting for it).
+   on the network request + <audio> "onended" event to always fire
+   is not safe (a slow/failed request or a webview quirk could hang
+   the whole conversation waiting for it).
    ============================================================ */
 function SpeakingSession({ weakSpots, onEnd, onExit }) {
   const [topic] = useState(() => TOPICS[Math.floor(Math.random() * TOPICS.length)]);
@@ -390,6 +390,7 @@ function SpeakingSession({ weakSpots, onEnd, onExit }) {
   const recognitionRef = useRef(null);
   const timerRef = useRef(null);
   const submitRef = useRef(() => {}); // always holds the latest submitUserMessage
+  const audioRef = useRef(null); // currently playing TTS <audio>, if any
 
   const weakSpotList = weakSpots
     .filter((w) => w.count >= 2)
@@ -448,22 +449,34 @@ function SpeakingSession({ weakSpots, onEnd, onExit }) {
   }, [submitUserMessage]);
 
   /* ---- text-to-speech: cosmetic, non-blocking, never hangs the pipeline ---- */
-  function speakAloud(text) {
-    if (!window.speechSynthesis) return;
+  async function speakAloud(text) {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    setAiSpeakingVisual(true);
+    // safety net — in case the audio never loads or onended never fires
+    setTimeout(() => setAiSpeakingVisual(false), Math.min(16000, 1200 + text.length * 70));
     try {
-      window.speechSynthesis.cancel();
-      const utter = new SpeechSynthesisUtterance(text);
-      utter.lang = "en-US";
-      utter.rate = 0.98;
-      const voices = window.speechSynthesis.getVoices();
-      const enVoice = voices.find((v) => v.lang === "en-US") || voices.find((v) => v.lang?.startsWith("en"));
-      if (enVoice) utter.voice = enVoice;
-      setAiSpeakingVisual(true);
-      utter.onend = () => setAiSpeakingVisual(false);
-      utter.onerror = () => setAiSpeakingVisual(false);
-      window.speechSynthesis.speak(utter);
-      // safety net — some browsers/webviews never fire onend
-      setTimeout(() => setAiSpeakingVisual(false), Math.min(16000, 1200 + text.length * 70));
+      const res = await fetch("/api/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw new Error("tts request failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.onended = () => {
+        setAiSpeakingVisual(false);
+        URL.revokeObjectURL(url);
+      };
+      audio.onerror = () => {
+        setAiSpeakingVisual(false);
+        URL.revokeObjectURL(url);
+      };
+      await audio.play();
     } catch {
       setAiSpeakingVisual(false);
     }
@@ -539,7 +552,7 @@ function SpeakingSession({ weakSpots, onEnd, onExit }) {
       try {
         recognitionRef.current && recognitionRef.current.stop();
       } catch {}
-      window.speechSynthesis && window.speechSynthesis.cancel();
+      audioRef.current && audioRef.current.pause();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
