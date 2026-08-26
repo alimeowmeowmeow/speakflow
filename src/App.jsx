@@ -123,6 +123,35 @@ function recentPhrases(sessions, n = 2, max = 3) {
   return Array.from(new Set(recent.flatMap((s) => s.usefulPhrases || []))).slice(0, max);
 }
 
+// Plain-text digest of everything tracked so far — meant to be copied into
+// a separate chat to work on specific recurring issues in more depth.
+function buildSummaryText(sessions) {
+  const aiSessions = sessions.filter((s) => s.type === "ai_session");
+  const weakSpots = aggregateWeakSpots(sessions);
+  const allPhrases = Array.from(new Set(aiSessions.flatMap((s) => s.usefulPhrases || [])));
+  const focuses = aiSessions.filter((s) => s.nextFocus).slice(-8);
+  const summaries = aiSessions.filter((s) => s.sessionSummary).slice(-8);
+
+  const lines = [`SpeakFlow summary — ${dateStr()}`, ""];
+
+  lines.push("RECURRING WEAK SPOTS:");
+  lines.push(...(weakSpots.length ? weakSpots.map((w) => `- ${w.category} (×${w.count}): ${w.issue}`) : ["- none yet"]));
+  lines.push("");
+
+  lines.push("PHRASES LEARNED:");
+  lines.push(...(allPhrases.length ? allPhrases.map((p) => `- ${p}`) : ["- none yet"]));
+  lines.push("");
+
+  lines.push("RECENT FOCUS NOTES:");
+  lines.push(...(focuses.length ? focuses.map((s) => `- (${s.date}) ${s.nextFocus}`) : ["- none yet"]));
+  lines.push("");
+
+  lines.push("WHAT WE'VE BEEN TALKING ABOUT:");
+  lines.push(...(summaries.length ? summaries.map((s) => `- (${s.date}) ${s.sessionSummary}`) : ["- none yet"]));
+
+  return lines.join("\n");
+}
+
 // Talks to our own /api/chat serverless function (see /api/chat.js), which
 // holds the real Anthropic API key server-side. The browser never sees the
 // key — this is the only safe way to call the API from a deployed site.
@@ -1224,7 +1253,7 @@ Base everything strictly on what's in the recap below — don't invent details i
 /* ============================================================
    PROGRESS
    ============================================================ */
-function Progress({ sessions, onExit }) {
+function Progress({ sessions, onExit, onExportSummary }) {
   const aiSessions = sessions.filter((s) => s.type === "ai_session");
   const clubSessions = sessions.filter((s) => s.type === "live_club");
   const easeTrend = aiSessions.filter((s) => typeof s.easeScore === "number").slice(-12);
@@ -1308,6 +1337,10 @@ function Progress({ sessions, onExit }) {
             </div>
           )}
         </div>
+
+        <button style={secondaryBtnStyle} onClick={onExportSummary}>
+          Export summary to work on elsewhere
+        </button>
       </div>
     </Screen>
   );
@@ -1429,6 +1462,44 @@ function SyncSettings({ syncCode, syncStatus, onLink, onExit }) {
 }
 
 /* ============================================================
+   SUMMARY EXPORT
+   ============================================================ */
+function SummaryExport({ sessions, onExit }) {
+  const [copied, setCopied] = useState(false);
+  const text = buildSummaryText(sessions);
+
+  function copy() {
+    try {
+      navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {}
+  }
+
+  return (
+    <Screen>
+      <TopBar title="Summary" onBack={onExit} />
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 14, overflowY: "auto" }}>
+        <button style={primaryBtnStyle} onClick={copy}>
+          {copied ? "Copied" : "Copy summary"}
+        </button>
+        <div
+          style={{
+            ...cardStyle,
+            whiteSpace: "pre-wrap",
+            fontFamily: "'IBM Plex Mono', monospace",
+            fontSize: 12.5,
+            lineHeight: 1.6,
+          }}
+        >
+          {text}
+        </div>
+      </div>
+    </Screen>
+  );
+}
+
+/* ============================================================
    ROOT APP
    ============================================================ */
 export default function App() {
@@ -1514,8 +1585,15 @@ export default function App() {
         />
       )}
 
-      {screen === "progress" && <Progress sessions={data.sessions} onExit={() => setScreen("home")} />}
+      {screen === "progress" && (
+        <Progress
+          sessions={data.sessions}
+          onExit={() => setScreen("home")}
+          onExportSummary={() => setScreen("summary")}
+        />
+      )}
       {screen === "weakspots" && <WeakSpots sessions={data.sessions} onExit={() => setScreen("home")} />}
+      {screen === "summary" && <SummaryExport sessions={data.sessions} onExit={() => setScreen("progress")} />}
       {screen === "sync" && (
         <SyncSettings
           syncCode={syncCode}
