@@ -141,7 +141,7 @@ async function callClaude({ system, messages, jsonMode = false }) {
           return JSON.parse(match[0]);
         } catch {}
       }
-      return null;
+      return { __rawText: cleaned }; // TEMP DIAGNOSTIC — surfaces what Claude actually returned when JSON parsing fails
     }
   }
   return text;
@@ -950,13 +950,18 @@ Rules: corrections array has AT MOST 3 items — pick only the most important re
     }`;
     const userMsg = `Transcript:\n${transcriptText}\n\nThe user said speaking felt this hard today (1-10): ${ease}\nWhat felt hardest, in their words: "${hardest || "(not specified)"}"`;
     const data = await callClaude({ system, messages: [{ role: "user", content: userMsg }], jsonMode: true });
-    setResult(
-      data || {
-        corrections: [],
-        phrases: [],
-        nextFocus: "Keep going — try to talk 20% longer before pausing.",
-      }
-    );
+    if (data && data.__rawText) {
+      // TEMP DIAGNOSTIC — remove once the empty-debrief cause is confirmed
+      setResult({ corrections: [], phrases: [], nextFocus: `[DEBUG raw]: ${data.__rawText}`.slice(0, 600) });
+    } else {
+      setResult(
+        data || {
+          corrections: [],
+          phrases: [],
+          nextFocus: "Keep going — try to talk 20% longer before pausing.",
+        }
+      );
+    }
     setStep("result");
   }
 
@@ -1119,7 +1124,17 @@ function LiveClubDebrief({ onSave, onExit }) {
 {"difficultMoments": ["short description of a moment that was hard"], "missingVocabulary": ["specific word or phrase they needed but didn't have"], "recurringMistakes": [{"issue": "short description", "category": "2-4 word category label, consistent wording e.g. 'past tense irregulars', 'articles a/the'"}], "nextFocus": "one specific, concrete focus for next practice, one sentence"}
 Base everything strictly on what's in the recap below — don't invent details it doesn't contain. Keep each list to at most 5 items.`;
     const data = await callClaude({ system, messages: [{ role: "user", content: text }], jsonMode: true });
-    setResult(data || { difficultMoments: [], missingVocabulary: [], recurringMistakes: [], nextFocus: "" });
+    if (data && data.__rawText) {
+      // TEMP DIAGNOSTIC — remove once the empty-debrief cause is confirmed
+      setResult({
+        difficultMoments: [],
+        missingVocabulary: [],
+        recurringMistakes: [],
+        nextFocus: `[DEBUG raw]: ${data.__rawText}`.slice(0, 600),
+      });
+    } else {
+      setResult(data || { difficultMoments: [], missingVocabulary: [], recurringMistakes: [], nextFocus: "" });
+    }
     setStep("result");
   }
 
