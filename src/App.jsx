@@ -114,6 +114,14 @@ function lastNextFocus(sessions) {
   const withFocus = sessions.filter((s) => s.type === "ai_session" && s.nextFocus);
   return withFocus.length ? withFocus[withFocus.length - 1].nextFocus : "";
 }
+function recentSessionSummaries(sessions, n = 2) {
+  const withSummary = sessions.filter((s) => s.type === "ai_session" && s.sessionSummary);
+  return withSummary.slice(-n).map((s) => `${s.date}: ${s.sessionSummary}`);
+}
+function recentPhrases(sessions, n = 2, max = 3) {
+  const recent = sessions.filter((s) => s.type === "ai_session").slice(-n);
+  return Array.from(new Set(recent.flatMap((s) => s.usefulPhrases || []))).slice(0, max);
+}
 
 // Talks to our own /api/chat serverless function (see /api/chat.js), which
 // holds the real Anthropic API key server-side. The browser never sees the
@@ -141,7 +149,7 @@ async function callClaude({ system, messages, jsonMode = false }) {
           return JSON.parse(match[0]);
         } catch {}
       }
-      return { __rawText: cleaned }; // TEMP DIAGNOSTIC — surfaces what Claude actually returned when JSON parsing fails
+      return null;
     }
   }
   return text;
@@ -485,7 +493,7 @@ const linkStyle = {
    is not safe (a slow/failed request or a webview quirk could hang
    the whole conversation waiting for it).
    ============================================================ */
-function SpeakingSession({ weakSpots, nextFocusHint, onEnd, onExit }) {
+function SpeakingSession({ weakSpots, nextFocusHint, recentSummaries, recentPhraseList, onEnd, onExit }) {
   const [topic] = useState(() => TOPICS[Math.floor(Math.random() * TOPICS.length)]);
   const [seconds, setSeconds] = useState(0);
 
@@ -532,8 +540,17 @@ Rules you always follow:
 - Start around B1-B2 difficulty and adapt gradually to how the user is doing.
 - If the user seems to be searching for a word, first encourage them to paraphrase or describe it, and only if they're still stuck, offer one natural expression.
 - Weave in natural opportunities (without announcing it) to use these areas the user has struggled with before, if it fits naturally: ${weakSpotList || "(none yet)"}.
+- Similarly, weave in natural opportunities to reuse these phrases she's learned recently, if it fits — don't force them or announce it: ${
+    recentPhraseList && recentPhraseList.length ? recentPhraseList.join(", ") : "(none yet)"
+  }.
 - Today's topic to explore together: ${topic}. Open with a short, friendly, specific question about it — don't just say "let's talk about X".${
     nextFocusHint ? `\n- Last time, the suggested focus for the next session was: "${nextFocusHint}". Keep this in mind if it fits naturally into the conversation — don't force it.` : ""
+  }${
+    recentSummaries && recentSummaries.length
+      ? `\n- What you talked about recently, for continuity — feel free to naturally follow up if it fits, don't force it:\n${recentSummaries
+          .map((s) => `  - ${s}`)
+          .join("\n")}`
+      : ""
   }`;
 
   /* ---- timer ---- */
@@ -942,7 +959,7 @@ function SessionDebrief({ session, sessions, onSave, onExit }) {
       .join("\n");
     const knownCategories = aggregateWeakSpots(sessions || []).map((w) => w.category);
     const system = `You analyze an English speaking practice transcript for a B1-to-B2 learner. Be direct and specific, not diplomatic. Return ONLY valid JSON, no prose, no markdown fences, matching exactly this shape:
-{"corrections": [{"issue": "short natural-language description of the mistake, quoting what they said if useful", "category": "2-4 word category label, consistent wording you'd reuse across sessions e.g. 'past tense irregulars', 'articles a/the', 'prepositions of time'"}], "phrases": ["natural phrase or expression they could use next time", "..."], "nextFocus": "one specific, concrete focus for the next session, one sentence"}
+{"corrections": [{"issue": "short natural-language description of the mistake, quoting what they said if useful", "category": "2-4 word category label, consistent wording you'd reuse across sessions e.g. 'past tense irregulars', 'articles a/the', 'prepositions of time'"}], "phrases": ["natural phrase or expression they could use next time", "..."], "sessionSummary": "1-2 sentences on what they actually talked about, specific enough that a follow-up conversation could reference it naturally", "nextFocus": "a short paragraph, 2-4 sentences: name the specific pattern that got in the way, how it showed up in this conversation, and one concrete thing to try next time"}
 Rules: corrections array has AT MOST 3 items — pick only the most important recurring or fluency-blocking ones, ignore minor one-off slips. phrases array has 3 to 5 natural, spoken-register phrases relevant to what they were actually talking about. Never invent mistakes that aren't in the transcript.${
       knownCategories.length
         ? ` Known category labels from past sessions: ${knownCategories.join(", ")}. If a mistake matches one of these, reuse the exact same label — don't invent a slightly different wording for the same kind of mistake. Only use a new label if it's genuinely a different kind of mistake.`
@@ -950,18 +967,14 @@ Rules: corrections array has AT MOST 3 items — pick only the most important re
     }`;
     const userMsg = `Transcript:\n${transcriptText}\n\nThe user said speaking felt this hard today (1-10): ${ease}\nWhat felt hardest, in their words: "${hardest || "(not specified)"}"`;
     const data = await callClaude({ system, messages: [{ role: "user", content: userMsg }], jsonMode: true });
-    if (data && data.__rawText) {
-      // TEMP DIAGNOSTIC — remove once the empty-debrief cause is confirmed
-      setResult({ corrections: [], phrases: [], nextFocus: `[DEBUG raw]: ${data.__rawText}`.slice(0, 600) });
-    } else {
-      setResult(
-        data || {
-          corrections: [],
-          phrases: [],
-          nextFocus: "Keep going — try to talk 20% longer before pausing.",
-        }
-      );
-    }
+    setResult(
+      data || {
+        corrections: [],
+        phrases: [],
+        sessionSummary: "",
+        nextFocus: "Keep going — try to talk 20% longer before pausing.",
+      }
+    );
     setStep("result");
   }
 
@@ -976,6 +989,7 @@ Rules: corrections array has AT MOST 3 items — pick only the most important re
       hardest,
       recurringErrors: result.corrections || [],
       usefulPhrases: result.phrases || [],
+      sessionSummary: result.sessionSummary || "",
       nextFocus: result.nextFocus || "",
     });
   }
@@ -1124,17 +1138,7 @@ function LiveClubDebrief({ onSave, onExit }) {
 {"difficultMoments": ["short description of a moment that was hard"], "missingVocabulary": ["specific word or phrase they needed but didn't have"], "recurringMistakes": [{"issue": "short description", "category": "2-4 word category label, consistent wording e.g. 'past tense irregulars', 'articles a/the'"}], "nextFocus": "one specific, concrete focus for next practice, one sentence"}
 Base everything strictly on what's in the recap below — don't invent details it doesn't contain. Keep each list to at most 5 items.`;
     const data = await callClaude({ system, messages: [{ role: "user", content: text }], jsonMode: true });
-    if (data && data.__rawText) {
-      // TEMP DIAGNOSTIC — remove once the empty-debrief cause is confirmed
-      setResult({
-        difficultMoments: [],
-        missingVocabulary: [],
-        recurringMistakes: [],
-        nextFocus: `[DEBUG raw]: ${data.__rawText}`.slice(0, 600),
-      });
-    } else {
-      setResult(data || { difficultMoments: [], missingVocabulary: [], recurringMistakes: [], nextFocus: "" });
-    }
+    setResult(data || { difficultMoments: [], missingVocabulary: [], recurringMistakes: [], nextFocus: "" });
     setStep("result");
   }
 
@@ -1444,6 +1448,8 @@ export default function App() {
 
   const weakSpots = aggregateWeakSpots(data.sessions);
   const nextFocusHint = lastNextFocus(data.sessions);
+  const sessionSummaries = recentSessionSummaries(data.sessions);
+  const recentPhraseList = recentPhrases(data.sessions);
 
   return (
     <>
@@ -1475,6 +1481,8 @@ export default function App() {
         <SpeakingSession
           weakSpots={weakSpots}
           nextFocusHint={nextFocusHint}
+          recentSummaries={sessionSummaries}
+          recentPhraseList={recentPhraseList}
           onExit={() => setScreen("home")}
           onEnd={(s) => {
             setActiveSession(s);
