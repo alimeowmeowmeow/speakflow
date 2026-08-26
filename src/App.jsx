@@ -156,10 +156,14 @@ function buildSummaryText(sessions) {
 // holds the real Anthropic API key server-side. The browser never sees the
 // key — this is the only safe way to call the API from a deployed site.
 async function callClaude({ system, messages, jsonMode = false }) {
+  // In jsonMode, prefill the assistant turn with "{" — Claude continues
+  // from it rather than repeating it, so the model is far less likely to
+  // wrap the JSON in prose or markdown. Reattached below before parsing.
+  const finalMessages = jsonMode ? [...messages, { role: "assistant", content: "{" }] : messages;
   const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ system, messages }),
+    body: JSON.stringify({ system, messages: finalMessages }),
   });
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
@@ -168,7 +172,7 @@ async function callClaude({ system, messages, jsonMode = false }) {
   const data = await res.json();
   const text = (data.text || "").trim();
   if (jsonMode) {
-    const cleaned = text.replace(/```json|```/g, "").trim();
+    const cleaned = ("{" + text).replace(/```json|```/g, "").trim();
     try {
       return JSON.parse(cleaned);
     } catch {
@@ -572,14 +576,14 @@ Rules you always follow:
 - Similarly, weave in natural opportunities to reuse these phrases she's learned recently, if it fits — don't force them or announce it: ${
     recentPhraseList && recentPhraseList.length ? recentPhraseList.join(", ") : "(none yet)"
   }.
-- Today's topic to explore together: ${topic}. Open with a short, friendly, specific question about it — don't just say "let's talk about X".${
-    nextFocusHint ? `\n- Last time, the suggested focus for the next session was: "${nextFocusHint}". Keep this in mind if it fits naturally into the conversation — don't force it.` : ""
-  }${
+${
     recentSummaries && recentSummaries.length
-      ? `\n- What you talked about recently, for continuity — feel free to naturally follow up if it fits, don't force it:\n${recentSummaries
+      ? `- Open the conversation by naturally following up on one of these from a recent session — like a real person who remembers you, not a disconnected drill each time. Reference it directly ("last time you mentioned X — how did that go?"), then let the conversation flow from there:\n${recentSummaries
           .map((s) => `  - ${s}`)
           .join("\n")}`
-      : ""
+      : `- Today's topic to explore together: ${topic}. Open with a short, friendly, specific question about it — don't just say "let's talk about X".`
+  }${
+    nextFocusHint ? `\n- Last time, the suggested focus for the next session was: "${nextFocusHint}". Keep this in mind if it fits naturally into the conversation — don't force it.` : ""
   }`;
 
   /* ---- timer ---- */
