@@ -96,19 +96,59 @@ function computeStreak(sessions) {
 function normalizeCategory(s) {
   return (s || "").trim().toLowerCase();
 }
+function daysBetween(dateStrEarlier, dateStrLater) {
+  return Math.round((new Date(dateStrLater) - new Date(dateStrEarlier)) / 86400000);
+}
+function trendFromHistory(history) {
+  if (!history || history.length < 2) return "flat";
+  const last = history[history.length - 1];
+  const prev = history[history.length - 2];
+  if (last > prev + 5) return "up";
+  if (last < prev - 5) return "down";
+  return "flat";
+}
 function aggregateWeakSpots(sessions) {
   const counts = new Map();
   sessions.forEach((s) => {
     (s.recurringErrors || []).forEach((e) => {
       const key = normalizeCategory(e.category || e.issue);
       if (!key) return;
-      const prev = counts.get(key) || { category: e.category || e.issue, issue: e.issue, count: 0 };
+      const prev =
+        counts.get(key) ||
+        { category: e.category || e.issue, issue: e.issue, count: 0, practiceCount: 0, lastPracticed: null, successHistory: [] };
       prev.count += 1;
       prev.issue = e.issue || prev.issue;
       counts.set(key, prev);
     });
   });
-  return Array.from(counts.values()).sort((a, b) => b.count - a.count);
+  sessions
+    .filter((s) => s.type === "weak_spot_practice" && s.targetCategory)
+    .forEach((s) => {
+      const key = normalizeCategory(s.targetCategory);
+      const prev =
+        counts.get(key) ||
+        { category: s.targetCategory, issue: "", count: 0, practiceCount: 0, lastPracticed: null, successHistory: [] };
+      prev.practiceCount += 1;
+      if (!prev.lastPracticed || s.date > prev.lastPracticed) prev.lastPracticed = s.date;
+      if (typeof s.successRate === "number") prev.successHistory.push(s.successRate);
+      counts.set(key, prev);
+    });
+  return Array.from(counts.values())
+    .map((w) => ({
+      ...w,
+      latestSuccessRate: w.successHistory.length ? w.successHistory[w.successHistory.length - 1] : null,
+      trend: trendFromHistory(w.successHistory),
+    }))
+    .sort((a, b) => b.count - a.count);
+}
+function rankWeakSpots(sessions) {
+  const today = dateStr();
+  return aggregateWeakSpots(sessions)
+    .map((w) => {
+      const daysSince = w.lastPracticed ? daysBetween(w.lastPracticed, today) : 999;
+      return { ...w, score: w.count * 2 + Math.min(daysSince, 14) };
+    })
+    .sort((a, b) => b.score - a.score);
 }
 function lastNextFocus(sessions) {
   const withFocus = sessions.filter((s) => s.type === "ai_session" && s.nextFocus);
@@ -419,7 +459,7 @@ const secondaryBtnStyle = {
 /* ============================================================
    HOME
    ============================================================ */
-function Home({ sessions, onStart, onLiveClub, onProgress, onWeakSpots, onSync }) {
+function Home({ sessions, onStart, onLiveClub, onPracticeWeakSpot, onProgress, onWeakSpots, onSync }) {
   const week = sessions.filter((s) => isThisWeek(s.date));
   const aiThisWeek = week.filter((s) => s.type === "ai_session").length;
   const clubThisWeek = week.filter((s) => s.type === "live_club").length;
@@ -452,6 +492,9 @@ function Home({ sessions, onStart, onLiveClub, onProgress, onWeakSpots, onSync }
           </button>
           <button style={secondaryBtnStyle} onClick={onLiveClub}>
             Debrief Live Club
+          </button>
+          <button style={secondaryBtnStyle} onClick={onPracticeWeakSpot}>
+            Practice a Weak Spot
           </button>
         </div>
 
@@ -526,7 +569,7 @@ const linkStyle = {
    is not safe (a slow/failed request or a webview quirk could hang
    the whole conversation waiting for it).
    ============================================================ */
-function SpeakingSession({ weakSpots, nextFocusHint, recentSummaries, recentPhraseList, onEnd, onExit }) {
+function SpeakingSession({ weakSpots, nextFocusHint, recentSummaries, recentPhraseList, practiceTarget, onEnd, onExit }) {
   const [topic] = useState(() => TOPICS[Math.floor(Math.random() * TOPICS.length)]);
   const [seconds, setSeconds] = useState(0);
 
@@ -559,7 +602,30 @@ function SpeakingSession({ weakSpots, nextFocusHint, recentSummaries, recentPhra
     .map((w) => w.category)
     .join(", ");
 
-  const system = `You are a warm, genuinely curious English conversation partner helping a B1-to-B2 learner get comfortable holding a real 30-40 minute conversation with a new person.
+  const targetSpot = practiceTarget
+    ? weakSpots.find((w) => normalizeCategory(w.category) === normalizeCategory(practiceTarget))
+    : null;
+  const practiceCount = targetSpot ? targetSpot.practiceCount || 0 : 0;
+  const difficultyNote =
+    practiceCount === 0
+      ? "This is her first time practicing this specific thing — keep it simple: straightforward questions that naturally require this construction."
+      : practiceCount === 1
+      ? "She's practiced this once before — push a bit further: ask her to elaborate, add details, tell a fuller story."
+      : "She's practiced this a few times already — go further: ask for her opinion, a comparison, or her reasons why, while still requiring this construction.";
+
+  const practiceSystem = `You are a warm, natural English conversation partner running a focused practice session for a B1-to-B2 learner.
+
+STUDENT: Alina, B1 level, native Russian speaker.
+
+TARGET FOR THIS SESSION: "${practiceTarget}". Your entire job this session is to create 4-5 different natural situations across the conversation that require her to use this specific construction — not by announcing it as an exercise, just by asking questions a real person would ask, which happen to require it. ${difficultyNote}
+Rules:
+- Speak only in natural, spoken-style English. No Russian, ever.
+- NEVER correct or point out mistakes during the conversation — just keep it flowing naturally. Analysis happens after, not here.
+- Keep your own turns short: 1-3 sentences, then a question that naturally pulls for "${practiceTarget}".
+- If she avoids the construction, don't call it out — just ask a follow-up that makes it hard to avoid.
+- Open directly with your first question requiring this construction — don't announce what you're doing.`;
+
+  const regularSystem = `You are a warm, genuinely curious English conversation partner helping a B1-to-B2 learner get comfortable holding a real 30-40 minute conversation with a new person.
 
 STUDENT: Alina, B1 level, native Russian speaker.
 CURRENT GOAL (through 1 Dec 2026): make live conversation feel normal, not stressful — hold a natural 30-40 min conversation with a new person without switching to Russian, at ease-of-speech 7/10+.
@@ -585,6 +651,8 @@ ${
   }${
     nextFocusHint ? `\n- Last time, the suggested focus for the next session was: "${nextFocusHint}". Keep this in mind if it fits naturally into the conversation — don't force it.` : ""
   }`;
+
+  const system = practiceTarget ? practiceSystem : regularSystem;
 
   /* ---- timer ---- */
   useEffect(() => {
@@ -830,7 +898,7 @@ ${
 
   return (
     <Screen>
-      <TopBar title={topic} onBack={onExit} />
+      <TopBar title={practiceTarget || topic} onBack={onExit} />
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 24 }}>
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 15, color: "#5C636D" }}>
@@ -957,7 +1025,7 @@ ${
 
       <button
         style={{ ...secondaryBtnStyle, marginTop: 16 }}
-        onClick={() => onEnd({ topic, seconds, transcript: transcriptRef.current })}
+        onClick={() => onEnd({ topic, seconds, transcript: transcriptRef.current, practiceTarget })}
       >
         End session
       </button>
@@ -1118,6 +1186,81 @@ function ResultBlock({ title, items, empty }) {
         </div>
       )}
     </div>
+  );
+}
+
+/* ============================================================
+   WEAK SPOT PRACTICE DEBRIEF
+   ============================================================ */
+function WeakSpotPracticeDebrief({ session, onSave, onExit }) {
+  const [step, setStep] = useState("generating"); // generating | result
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const transcriptText = session.transcript
+        .map((t) => `${t.role === "assistant" ? "AI" : "User"}: ${t.content}`)
+        .join("\n");
+      const system = `You analyze whether an English learner (B1-to-B2, native Russian speaker) successfully used a specific target construction during a focused practice conversation. Return ONLY valid JSON, no prose, no markdown fences, matching exactly this shape:
+{"successRate": 0-100, "goodExamples": ["a turn where she used the construction well, quoting her"], "missedExamples": ["a turn where the construction was needed but she missed it or got it wrong, quoting her"], "tip": "one specific, concrete tip for next time, 1-2 sentences"}
+Rules: successRate is the percentage of her turns where the target construction was clearly called for and she used it correctly — only count turns where it was actually natural/required by the question. Base everything strictly on the transcript below, never invent examples.`;
+      const userMsg = `Target construction: "${session.practiceTarget}"\n\nTranscript:\n${transcriptText}`;
+      const data = await callClaude({ system, messages: [{ role: "user", content: userMsg }], jsonMode: true });
+      setResult(
+        data || {
+          successRate: 0,
+          goodExamples: [],
+          missedExamples: [],
+          tip: "Not enough data to analyze this time — try a slightly longer practice session.",
+        }
+      );
+      setStep("result");
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function save() {
+    onSave({
+      id: uid(),
+      date: dateStr(),
+      type: "weak_spot_practice",
+      targetCategory: session.practiceTarget,
+      duration: session.seconds,
+      successRate: typeof result.successRate === "number" ? result.successRate : 0,
+      goodExamples: result.goodExamples || [],
+      missedExamples: result.missedExamples || [],
+      tip: result.tip || "",
+    });
+  }
+
+  return (
+    <Screen>
+      <TopBar title="Practice Debrief" onBack={onExit} />
+      {step === "generating" && (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 18 }}>
+          <BreathOrb state="listening" size={90} />
+          <div style={{ color: "#8B93A1", fontSize: 14 }}>Checking how it went…</div>
+        </div>
+      )}
+      {step === "result" && result && (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 18, overflowY: "auto" }}>
+          <div style={cardStyle}>
+            <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 8 }}>{session.practiceTarget}</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 32, color: "#EDEFF2" }}>{result.successRate}%</div>
+            <div style={{ fontSize: 12.5, color: "#5C636D", marginTop: 2 }}>success this session</div>
+          </div>
+          <ResultBlock title="Good examples" items={result.goodExamples} empty="Nothing standout yet — keep practicing." />
+          <ResultBlock title="Missed opportunities" items={result.missedExamples} empty="None — solid session." />
+          <div style={cardStyle}>
+            <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 8 }}>Tip for next time</div>
+            <div style={{ fontSize: 15, color: "#EDEFF2" }}>{result.tip}</div>
+          </div>
+          <button style={primaryBtnStyle} onClick={save}>
+            Save & done
+          </button>
+        </div>
+      )}
+    </Screen>
   );
 }
 
@@ -1371,12 +1514,69 @@ function WeakSpots({ sessions, onExit }) {
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: "#8B93A1" }}>×{s.count}</div>
               </div>
               <div style={{ fontSize: 13, color: "#5C636D", marginTop: 6 }}>{s.issue}</div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 12, color: "#8B93A1", marginTop: 10 }}>
+                {s.practiceCount > 0 ? (
+                  <>
+                    <span>practiced {s.practiceCount}×</span>
+                    <span>last: {s.lastPracticed}</span>
+                    <span>success {s.latestSuccessRate}%</span>
+                    {s.trend === "up" && <span style={{ color: "#6FB3AA" }}>↑ improving</span>}
+                    {s.trend === "down" && <span style={{ color: "#C97B63" }}>↓ slipping</span>}
+                  </>
+                ) : (
+                  <span>not practiced yet</span>
+                )}
+              </div>
               {s.count >= 2 && (
-                <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 10, fontSize: 12, color: "#E3A868" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 8, fontSize: 12, color: "#E3A868" }}>
                   <Sparkles size={12} /> woven into your next sessions
                 </div>
               )}
             </div>
+          ))
+        )}
+      </div>
+    </Screen>
+  );
+}
+
+/* ============================================================
+   WEAK SPOT SELECTOR
+   ============================================================ */
+function WeakSpotSelector({ sessions, onSelect, onExit }) {
+  const spots = rankWeakSpots(sessions);
+  return (
+    <Screen>
+      <TopBar title="Practice a Weak Spot" onBack={onExit} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, overflowY: "auto" }}>
+        {spots.length === 0 ? (
+          <div style={{ ...cardStyle, textAlign: "center", color: "#5C636D", fontSize: 14 }}>
+            Nothing tracked yet — finish a few regular sessions first, then come back here to work on specific weak spots.
+          </div>
+        ) : (
+          spots.map((w, i) => (
+            <button
+              key={i}
+              onClick={() => onSelect(w.category)}
+              style={{ ...cardStyle, textAlign: "left", cursor: "pointer", border: "1px solid #262B33", width: "100%" }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ fontSize: 15.5, color: "#EDEFF2" }}>{w.category}</div>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: "#5C636D" }}>×{w.count}</div>
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 12.5, color: "#8B93A1", marginTop: 8 }}>
+                {w.practiceCount > 0 ? (
+                  <>
+                    <span>practiced {w.practiceCount}×</span>
+                    <span>last success {w.latestSuccessRate}%</span>
+                    {w.trend === "up" && <span style={{ color: "#6FB3AA" }}>↑ improving</span>}
+                    {w.trend === "down" && <span style={{ color: "#C97B63" }}>↓ slipping</span>}
+                  </>
+                ) : (
+                  <span>not practiced yet</span>
+                )}
+              </div>
+            </button>
           ))
         )}
       </div>
@@ -1510,6 +1710,7 @@ export default function App() {
   const { data, loaded, addSession, syncCode, syncStatus, linkSyncCode } = useSpeakFlowData();
   const [screen, setScreen] = useState("home");
   const [activeSession, setActiveSession] = useState(null);
+  const [practiceTarget, setPracticeTarget] = useState(null);
 
   if (!loaded) {
     return (
@@ -1543,12 +1744,26 @@ export default function App() {
           sessions={data.sessions}
           onStart={() => {
             unlockAudio();
+            setPracticeTarget(null);
             setScreen("session");
           }}
           onLiveClub={() => setScreen("liveclub")}
+          onPracticeWeakSpot={() => setScreen("weakspotselector")}
           onProgress={() => setScreen("progress")}
           onWeakSpots={() => setScreen("weakspots")}
           onSync={() => setScreen("sync")}
+        />
+      )}
+
+      {screen === "weakspotselector" && (
+        <WeakSpotSelector
+          sessions={data.sessions}
+          onExit={() => setScreen("home")}
+          onSelect={(category) => {
+            unlockAudio();
+            setPracticeTarget(category);
+            setScreen("session");
+          }}
         />
       )}
 
@@ -1558,10 +1773,14 @@ export default function App() {
           nextFocusHint={nextFocusHint}
           recentSummaries={sessionSummaries}
           recentPhraseList={recentPhraseList}
-          onExit={() => setScreen("home")}
+          practiceTarget={practiceTarget}
+          onExit={() => {
+            setPracticeTarget(null);
+            setScreen("home");
+          }}
           onEnd={(s) => {
             setActiveSession(s);
-            setScreen("debrief");
+            setScreen(s.practiceTarget ? "weakspotdebrief" : "debrief");
           }}
         />
       )}
@@ -1574,6 +1793,23 @@ export default function App() {
           onSave={(record) => {
             addSession(record);
             setActiveSession(null);
+            setScreen("home");
+          }}
+        />
+      )}
+
+      {screen === "weakspotdebrief" && activeSession && (
+        <WeakSpotPracticeDebrief
+          session={activeSession}
+          onExit={() => {
+            setActiveSession(null);
+            setPracticeTarget(null);
+            setScreen("home");
+          }}
+          onSave={(record) => {
+            addSession(record);
+            setActiveSession(null);
+            setPracticeTarget(null);
             setScreen("home");
           }}
         />
