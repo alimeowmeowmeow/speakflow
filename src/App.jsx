@@ -1067,7 +1067,10 @@ Rules: corrections array has AT MOST 3 items — pick only the most important re
         : ""
     }`;
     const userMsg = `Transcript:\n${transcriptText}\n\nThe user said speaking felt this hard today (1-10): ${ease}\nWhat felt hardest, in their words: "${hardest || "(not specified)"}"`;
-    const data = await callClaude({ system, messages: [{ role: "user", content: userMsg }], jsonMode: true });
+    let data = null;
+    try {
+      data = await callClaude({ system, messages: [{ role: "user", content: userMsg }], jsonMode: true });
+    } catch {}
     setResult(
       data || {
         corrections: [],
@@ -1198,22 +1201,32 @@ function WeakSpotPracticeDebrief({ session, onSave, onExit }) {
 
   useEffect(() => {
     (async () => {
-      const transcriptText = session.transcript
-        .map((t) => `${t.role === "assistant" ? "AI" : "User"}: ${t.content}`)
-        .join("\n");
-      const system = `You analyze whether an English learner (B1-to-B2, native Russian speaker) successfully used a specific target construction during a focused practice conversation. Return ONLY valid JSON, no prose, no markdown fences, matching exactly this shape:
+      try {
+        const transcriptText = session.transcript
+          .map((t) => `${t.role === "assistant" ? "AI" : "User"}: ${t.content}`)
+          .join("\n");
+        const system = `You analyze whether an English learner (B1-to-B2, native Russian speaker) successfully used a specific target construction during a focused practice conversation. Return ONLY valid JSON, no prose, no markdown fences, matching exactly this shape:
 {"successRate": 0-100, "goodExamples": ["a turn where she used the construction well, quoting her"], "missedExamples": ["a turn where the construction was needed but she missed it or got it wrong, quoting her"], "tip": "one specific, concrete tip for next time, 1-2 sentences"}
 Rules: successRate is the percentage of her turns where the target construction was clearly called for and she used it correctly — only count turns where it was actually natural/required by the question. Base everything strictly on the transcript below, never invent examples.`;
-      const userMsg = `Target construction: "${session.practiceTarget}"\n\nTranscript:\n${transcriptText}`;
-      const data = await callClaude({ system, messages: [{ role: "user", content: userMsg }], jsonMode: true });
-      setResult(
-        data || {
+        const userMsg = `Target construction: "${session.practiceTarget}"\n\nTranscript:\n${transcriptText}`;
+        const data = await callClaude({ system, messages: [{ role: "user", content: userMsg }], jsonMode: true });
+        setResult(
+          data || {
+            successRate: 0,
+            goodExamples: [],
+            missedExamples: [],
+            tip: "Not enough data to analyze this time — try a slightly longer practice session.",
+          }
+        );
+      } catch {
+        // never leave the screen stuck on "generating" — always land on something showable
+        setResult({
           successRate: 0,
           goodExamples: [],
           missedExamples: [],
-          tip: "Not enough data to analyze this time — try a slightly longer practice session.",
-        }
-      );
+          tip: "Couldn't analyze this session (a network or server hiccup) — your practice still counts, try again next time.",
+        });
+      }
       setStep("result");
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1313,7 +1326,10 @@ function LiveClubDebrief({ onSave, onExit }) {
     const system = `You analyze a short recap of a real, in-person English speaking club session for a B1-to-B2 learner. Return ONLY valid JSON, no prose, no markdown fences, matching exactly:
 {"difficultMoments": ["short description of a moment that was hard"], "missingVocabulary": ["specific word or phrase they needed but didn't have"], "recurringMistakes": [{"issue": "short description", "category": "2-4 word category label, consistent wording e.g. 'past tense irregulars', 'articles a/the'"}], "nextFocus": "one specific, concrete focus for next practice, one sentence"}
 Base everything strictly on what's in the recap below — don't invent details it doesn't contain. Keep each list to at most 5 items.`;
-    const data = await callClaude({ system, messages: [{ role: "user", content: text }], jsonMode: true });
+    let data = null;
+    try {
+      data = await callClaude({ system, messages: [{ role: "user", content: text }], jsonMode: true });
+    } catch {}
     setResult(data || { difficultMoments: [], missingVocabulary: [], recurringMistakes: [], nextFocus: "" });
     setStep("result");
   }
