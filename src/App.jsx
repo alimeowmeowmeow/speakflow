@@ -1218,13 +1218,14 @@ Rules: successRate is the percentage of her turns where the target construction 
             tip: "Not enough data to analyze this time — try a slightly longer practice session.",
           }
         );
-      } catch {
+      } catch (err) {
         // never leave the screen stuck on "generating" — always land on something showable
         setResult({
           successRate: 0,
           goodExamples: [],
           missedExamples: [],
-          tip: "Couldn't analyze this session (a network or server hiccup) — your practice still counts, try again next time.",
+          // TEMP DIAGNOSTIC — replace with a friendly generic message once the real cause is confirmed
+          tip: `[DEBUG] ${(err && err.message) || String(err)}`.slice(0, 400),
         });
       }
       setStep("result");
